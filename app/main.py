@@ -8,7 +8,7 @@ from typing import Optional
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
 
 from .config import get_settings
 from .render import run_render_job
@@ -30,8 +30,8 @@ app = FastAPI(title="SUP Render Worker", lifespan=lifespan)
 
 
 class RenderRequest(BaseModel):
-    row_number: int
-    youtube_url: HttpUrl
+    row_number: int | str
+    youtube_url: str
     clip_start: str           # e.g. "1:30" or "0:01:30"
     clip_end: str             # e.g. "1:35"
     headline: str = ""        # overlay text (your Caption Idea)

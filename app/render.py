@@ -54,7 +54,7 @@ def run(cmd: list[str], check=True):
 
 def download_youtube(url: str, out_path: Path) -> Path:
     ydl_opts = {
-        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        "format": "bestvideo[height<=1080]+bestaudio/best",
         "outtmpl": str(out_path.with_suffix(".%(ext)s")),
         "merge_output_format": "mp4",
         "quiet": True,
