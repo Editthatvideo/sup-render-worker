@@ -25,7 +25,11 @@ def _credentials():
         info = json.loads(raw)
     else:
         info = json.loads(Path(raw).read_text())
-    return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    # Impersonate the user so uploads count against their storage quota
+    if settings.gdrive_impersonate_email:
+        creds = creds.with_subject(settings.gdrive_impersonate_email)
+    return creds
 
 
 def _service():
