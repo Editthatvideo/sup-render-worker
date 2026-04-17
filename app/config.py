@@ -24,7 +24,7 @@ class Settings(BaseModel):
     # Rendering
     output_width: int = 1080
     output_height: int = 1920
-    headline_font_size: int = 44
+    headline_font_size: int = 52
     caption_font_size: int = 42
     font_path: str = "/usr/share/fonts/truetype/custom/Anton-Regular.ttf"
 

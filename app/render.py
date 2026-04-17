@@ -365,8 +365,8 @@ def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
     # Headline — one drawtext per line (avoids newline glyph rendering as □)
     if headline.strip():
         lines = _wrap_text(headline.upper(), max_chars=20).split("\n")
-        line_height = settings.headline_font_size + 14
-        y_start = 80
+        line_height = settings.headline_font_size + 18
+        y_start = 150
         # Fade in over 0.8s: if(lt(t,0.8), t/0.8, 1)
         # Commas escaped with \ for ffmpeg filter-graph parser
         alpha_expr = "if(lt(t\\,0.8)\\,t/0.8\\,1)"
