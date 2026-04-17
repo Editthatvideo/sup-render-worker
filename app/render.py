@@ -111,6 +111,17 @@ def trim_and_reframe(src: Path, dst: Path, start_s: float, end_s: float, w: int,
     return dst
 
 
+def _first_sentence(text: str) -> str:
+    """Extract just the first sentence — the hook line."""
+    # Split on sentence-ending punctuation, keep the punctuation
+    m = re.match(r"^(.+?[.!?])\s", text.strip())
+    if m:
+        return m.group(1).strip()
+    # If no sentence break found, take first ~6 words as a short hook
+    words = text.strip().split()
+    return " ".join(words[:6])
+
+
 def _wrap_text(text: str, max_chars: int = 25) -> str:
     """Word-wrap text into lines of ~max_chars, joined by newlines."""
     words = text.split()
@@ -261,8 +272,10 @@ def run_render_job(job_id: str, req: dict) -> dict:
         ]
         headline = pick_best_caption(ideas, req.get("scene_description", ""), settings.openai_api_key)
 
-    log.info("[%s] Burning captions + headline: %s", job_id, headline)
-    burn_captions(trimmed, srt, headline, final, settings)
+    # Use only the first sentence as the hook — don't give away the punchline
+    hook = _first_sentence(headline) if headline else ""
+    log.info("[%s] Burning captions + hook: %s", job_id, hook)
+    burn_captions(trimmed, srt, hook, final, settings)
 
     log.info("[%s] Uploading to Drive", job_id)
     drive_result = upload_file(final, f"{final.name}")
