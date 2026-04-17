@@ -24,8 +24,8 @@ class Settings(BaseModel):
     # Rendering
     output_width: int = 1080
     output_height: int = 1920
-    headline_font_size: int = 72
-    caption_font_size: int = 54
+    headline_font_size: int = 58
+    caption_font_size: int = 42
     font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVu-Sans-Bold.ttf"
 
     # Runtime

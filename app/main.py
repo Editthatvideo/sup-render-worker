@@ -34,7 +34,10 @@ class RenderRequest(BaseModel):
     youtube_url: str
     clip_start: str           # e.g. "1:30" or "0:01:30"
     clip_end: str             # e.g. "1:35"
-    headline: str = ""        # overlay text (your Caption Idea)
+    headline: str = ""        # overlay text — if empty, AI picks from caption_ideas
+    caption_idea_1: str = ""
+    caption_idea_2: str = ""
+    caption_idea_3: str = ""
     movie_show: str = ""      # for filename
     scene_description: str = ""
 

@@ -103,7 +103,7 @@ def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
     # Subtitles (force_style overrides the SRT defaults)
     if srt.exists() and srt.stat().st_size > 0:
         style = (
-            f"FontName=DejaVu Sans Bold,FontSize=18,PrimaryColour=&H00FFFFFF,"
+            f"FontName=DejaVu Sans Bold,FontSize=14,PrimaryColour=&H00FFFFFF,"
             f"OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,"
             f"Alignment=2,MarginV=80"
         )
@@ -152,6 +152,37 @@ def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
     return srt_out
 
 
+# ---- AI Caption Picker ------------------------------------------------------
+
+def pick_best_caption(ideas: list[str], scene: str, api_key: str) -> str:
+    """Use GPT to pick the best TikTok/Reels caption from up to 3 ideas."""
+    ideas = [i.strip() for i in ideas if i.strip()]
+    if not ideas:
+        return ""
+    if len(ideas) == 1:
+        return ideas[0]
+
+    numbered = "\n".join(f"{i+1}. {c}" for i, c in enumerate(ideas))
+    prompt = (
+        f"You are a viral social-media expert. Pick the single best caption for a "
+        f"TikTok/Reels short video.\n\n"
+        f"Scene: {scene}\n\n"
+        f"Caption options:\n{numbered}\n\n"
+        f"Reply with ONLY the winning caption text — no number, no quotes, no explanation."
+    )
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=120,
+        temperature=0.3,
+    )
+    chosen = resp.choices[0].message.content.strip().strip('"').strip("'")
+    log.info("AI picked caption: %s", chosen)
+    return chosen
+
+
 # ---- Orchestration ----------------------------------------------------------
 
 def _slug(s: str) -> str:
@@ -184,8 +215,18 @@ def run_render_job(job_id: str, req: dict) -> dict:
     log.info("[%s] Transcribing", job_id)
     transcribe_to_srt(trimmed, srt, settings.openai_api_key)
 
-    log.info("[%s] Burning captions + headline", job_id)
-    burn_captions(trimmed, srt, req.get("headline", ""), final, settings)
+    # Pick the best caption via AI if no explicit headline given
+    headline = req.get("headline", "").strip()
+    if not headline:
+        ideas = [
+            req.get("caption_idea_1", ""),
+            req.get("caption_idea_2", ""),
+            req.get("caption_idea_3", ""),
+        ]
+        headline = pick_best_caption(ideas, req.get("scene_description", ""), settings.openai_api_key)
+
+    log.info("[%s] Burning captions + headline: %s", job_id, headline)
+    burn_captions(trimmed, srt, headline, final, settings)
 
     log.info("[%s] Uploading to Drive", job_id)
     drive_result = upload_file(final, f"{final.name}")
