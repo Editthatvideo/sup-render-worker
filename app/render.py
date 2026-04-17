@@ -270,8 +270,33 @@ def _fmt_srt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _segment_dialogue(full_text: str, api_key: str) -> list[str]:
+    """Use GPT to split raw transcript into natural subtitle lines."""
+    prompt = (
+        f"Split this dialogue into short subtitle lines for a TikTok video. Rules:\n"
+        f"- Max 6 words per line\n"
+        f"- Break at natural pauses, speaker changes, and sentence ends\n"
+        f"- Add proper punctuation\n"
+        f"- Each line should feel like a beat — one thought, one reaction\n"
+        f"- If someone asks a question, that's its own line\n"
+        f"- If someone answers, that's its own line\n\n"
+        f"Transcript: {full_text}\n\n"
+        f"Reply with ONLY the subtitle lines, one per line. No numbers, no timestamps."
+    )
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.2,
+    )
+    lines = [l.strip() for l in resp.choices[0].message.content.strip().splitlines() if l.strip()]
+    log.info("GPT segmented dialogue into %d lines", len(lines))
+    return lines
+
+
 def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
-    """Transcribe with word timestamps, split into complete sentences."""
+    """Transcribe with word timestamps, use GPT to segment into natural dialogue beats."""
     client = OpenAI(api_key=api_key)
     with open(src, "rb") as f:
         resp = client.audio.transcriptions.create(
@@ -288,23 +313,23 @@ def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
         srt_out.write_text("", encoding="utf-8")
         return srt_out
 
-    # Split the punctuated transcript into complete sentences
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', full_text) if s.strip()]
+    # GPT segments the dialogue into natural subtitle beats
+    lines = _segment_dialogue(full_text, api_key)
 
-    # Map each sentence to word-level timestamps
+    # Map each GPT line to word-level timestamps
     chunks = []
-    wi = 0  # current position in word list
-    for sentence in sentences:
-        n = len(sentence.split())  # word count in this sentence
+    wi = 0
+    for line in lines:
+        n = len(line.split())
         if wi >= len(words):
             break
         start = words[wi].start
         end_idx = min(wi + n - 1, len(words) - 1)
         end = words[end_idx].end
-        chunks.append({"start": start, "end": end, "text": sentence})
+        chunks.append({"start": start, "end": end, "text": line})
         wi += n
 
-    # Catch any leftover words not covered by sentence split
+    # Catch any leftover words
     if wi < len(words):
         leftover = " ".join(w.word for w in words[wi:]).strip()
         if leftover:
@@ -323,7 +348,7 @@ def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
         srt_lines.append("")
 
     srt_out.write_text("\n".join(srt_lines), encoding="utf-8")
-    log.info("Generated %d subtitle sentences from %d words", len(chunks), len(words))
+    log.info("Generated %d subtitle lines from %d words", len(chunks), len(words))
     return srt_out
 
 
