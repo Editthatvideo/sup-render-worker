@@ -141,30 +141,62 @@ def search_youtube(movie_show: str, scene: str, work_dir: Path, openai_key: str 
     raise ValueError(f"No YouTube results for: {movie_show} — {scene}")
 
 
-def download_youtube(url: str, out_path: Path) -> Path:
-    cookie_file = _write_cookies_file(out_path.parent)
+def _try_ytdlp(url: str, out_path: Path, use_cookies: bool, player_clients: list[str]) -> Path:
+    """Single yt-dlp attempt with given settings."""
     ydl_opts = {
-        "format": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best/best",
+        "format": "best[height<=1080]/best",  # single stream — avoids merge issues
         "outtmpl": str(out_path.with_suffix(".%(ext)s")),
         "merge_output_format": "mp4",
-        "quiet": True,
+        "quiet": False,
         "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": ["web", "mweb", "ios"]}},
+        "extractor_args": {"youtube": {"player_client": player_clients}},
+        "socket_timeout": 30,
     }
-    if cookie_file:
-        ydl_opts["cookiefile"] = str(cookie_file)
+    if use_cookies:
+        cookie_file = _write_cookies_file(out_path.parent)
+        if cookie_file:
+            ydl_opts["cookiefile"] = str(cookie_file)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        # yt-dlp may pick a different extension; find the merged file
         final = Path(ydl.prepare_filename(info)).with_suffix(".mp4")
         if not final.exists():
-            # fallback: pick whichever file it wrote next to out_path
             candidates = list(out_path.parent.glob(out_path.stem + ".*"))
             if not candidates:
                 raise FileNotFoundError("yt-dlp produced no file")
             final = candidates[0]
-    log.info("Downloaded to %s", final)
     return final
+
+
+def download_youtube(url: str, out_path: Path) -> Path:
+    """Download with multiple fallback strategies — cookies are LAST resort."""
+    strategies = [
+        # 1. No cookies, web client — works for most public clips
+        {"use_cookies": False, "player_clients": ["web"]},
+        # 2. No cookies, mobile web client
+        {"use_cookies": False, "player_clients": ["mweb"]},
+        # 3. With cookies, web client — last resort
+        {"use_cookies": True, "player_clients": ["web", "mweb"]},
+    ]
+
+    last_error = None
+    for i, strat in enumerate(strategies, 1):
+        label = f"Strategy {i}: cookies={strat['use_cookies']}, clients={strat['player_clients']}"
+        log.info("Download attempt — %s", label)
+        try:
+            final = _try_ytdlp(url, out_path, **strat)
+            log.info("Downloaded to %s via %s", final, label)
+            return final
+        except Exception as e:
+            last_error = e
+            log.warning("Failed (%s): %s", label, e)
+            # Clean up partial files before next attempt
+            for f in out_path.parent.glob(out_path.stem + ".*"):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+
+    raise RuntimeError(f"All download strategies failed for {url}: {last_error}")
 
 
 # ---- FFmpeg ops -------------------------------------------------------------
@@ -391,7 +423,6 @@ def pick_best_caption(ideas: list[str], scene: str, api_key: str) -> str:
 
 def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
     """Grab YouTube's auto-captions without downloading the video."""
-    cookie_file = _write_cookies_file(work_dir)
     ydl_opts = {
         "skip_download": True,
         "writeautomaticsub": True,
@@ -401,10 +432,8 @@ def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
         "outtmpl": str(work_dir / "subs"),
         "quiet": True,
         "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": ["web", "mweb", "ios"]}},
+        "extractor_args": {"youtube": {"player_client": ["web"]}},
     }
-    if cookie_file:
-        ydl_opts["cookiefile"] = str(cookie_file)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
