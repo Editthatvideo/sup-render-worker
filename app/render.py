@@ -124,19 +124,17 @@ def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
         )
         filters.append(f"subtitles={shlex.quote(str(srt))}:force_style='{style}'")
 
-    # Headline via drawtext (top of frame, word-wrapped)
+    # Headline via drawtext (top of frame, word-wrapped, outline style)
     if headline.strip():
-        wrapped = _wrap_text(headline, max_chars=22)
-        safe = (
-            wrapped.replace("\\", "\\\\")
-                   .replace(":", "\\:")
-                   .replace("'", "\u2019")
-        )
+        wrapped = _wrap_text(headline.upper(), max_chars=20)
+        # Write to temp file to avoid shell escaping / encoding issues
+        headline_file = src.parent / "headline.txt"
+        headline_file.write_text(wrapped, encoding="utf-8")
         filters.append(
             f"drawtext=fontfile={settings.font_path}:"
-            f"text='{safe}':"
+            f"textfile={shlex.quote(str(headline_file))}:"
             f"fontsize={settings.headline_font_size}:fontcolor=white:"
-            f"box=1:boxcolor=black@0.55:boxborderw=24:"
+            f"borderw=4:bordercolor=black:"
             f"x=(w-text_w)/2:y=80:"
             f"line_spacing=14"
         )

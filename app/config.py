@@ -26,7 +26,7 @@ class Settings(BaseModel):
     output_height: int = 1920
     headline_font_size: int = 44
     caption_font_size: int = 42
-    font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVu-Sans-Bold.ttf"
+    font_path: str = "/usr/share/fonts/truetype/custom/Anton-Regular.ttf"
 
     # Runtime
     work_dir: str = "/tmp/renders"
@@ -47,6 +47,6 @@ def get_settings() -> Settings:
         output_height=int(os.environ.get("OUTPUT_HEIGHT", 1920)),
         headline_font_size=int(os.environ.get("HEADLINE_FONT_SIZE", 44)),
         caption_font_size=int(os.environ.get("CAPTION_FONT_SIZE", 54)),
-        font_path=os.environ.get("FONT_PATH", "/usr/share/fonts/truetype/dejavu/DejaVu-Sans-Bold.ttf"),
+        font_path=os.environ.get("FONT_PATH", "/usr/share/fonts/truetype/custom/Anton-Regular.ttf"),
         work_dir=os.environ.get("WORK_DIR", "/tmp/renders"),
     )

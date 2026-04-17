@@ -8,7 +8,16 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-dejavu-core \
+        fonts-liberation2 \
+        fontconfig \
+        wget \
         ca-certificates \
+    && mkdir -p /usr/share/fonts/truetype/custom \
+    && wget -q -O /tmp/Anton.zip "https://fonts.google.com/download?family=Anton" \
+    && unzip -o /tmp/Anton.zip -d /usr/share/fonts/truetype/custom/ \
+    && fc-cache -f \
+    && rm -f /tmp/Anton.zip \
+    && apt-get purge -y wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
