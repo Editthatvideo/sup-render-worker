@@ -149,7 +149,7 @@ def download_youtube(url: str, out_path: Path) -> Path:
     cmd = [
         "yt-dlp",
         "--remote-components", "ejs:github",
-        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        "-f", "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
         "-o", out_template,
         "--merge-output-format", "mp4",
         "--no-playlist",
@@ -231,21 +231,33 @@ def _detect_face_x(src: Path, start_s: float, duration: float) -> float | None:
             continue
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img_h, img_w = img.shape[:2]
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
 
         for (fx, fy, fw, fh) in faces:
-            # Store center X as ratio of frame width
-            center_x = (fx + fw / 2) / img.shape[1]
-            all_face_x.append(center_x)
+            # Only count faces that are at least 8% of frame width (meaningful size)
+            face_ratio = fw / img_w
+            if face_ratio < 0.08:
+                continue
+            # Weight larger faces more (main character vs background extra)
+            center_x = (fx + fw / 2) / img_w
+            # Add multiple times based on size — bigger face = more weight
+            weight = max(1, int(face_ratio * 20))
+            all_face_x.extend([center_x] * weight)
 
         frame_path.unlink(missing_ok=True)
 
     if not all_face_x:
-        log.info("No faces detected — using center crop")
+        log.info("No significant faces detected — using center crop")
         return None
 
     avg_x = float(np.mean(all_face_x))
-    log.info("Detected %d faces across %d frames, avg X position: %.2f", len(all_face_x), len(sample_times), avg_x)
+    # If face is very close to center (0.4-0.6), just use center crop — don't overcorrect
+    if 0.4 <= avg_x <= 0.6:
+        log.info("Face near center (%.2f) — using standard center crop", avg_x)
+        return None
+
+    log.info("Detected faces, weighted avg X position: %.2f", avg_x)
     return avg_x
 
 
