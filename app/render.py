@@ -149,7 +149,7 @@ def download_youtube(url: str, out_path: Path) -> Path:
     cmd = [
         "yt-dlp",
         "--remote-components", "ejs:github",
-        "-f", "best[height<=1080]/best",
+        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         "-o", out_template,
         "--merge-output-format", "mp4",
         "--no-playlist",
