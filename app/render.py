@@ -94,26 +94,85 @@ def _youtube_api_search(query: str, yt_api_key: str, max_results: int = 5) -> li
         "part": "snippet",
         "q": query,
         "type": "video",
-        "videoDuration": "short",  # under 4 min — clips, not full movies
+        "videoDuration": "medium",  # 4-20 min — full scene clips, not 10s teasers
         "maxResults": max_results,
         "key": yt_api_key,
     }
     resp = httpx.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=15)
     resp.raise_for_status()
     items = resp.json().get("items", [])
-    return [
+    results = [
         {
             "id": item["id"]["videoId"],
             "title": item["snippet"]["title"],
+            "channel": item["snippet"].get("channelTitle", ""),
             "url": f"https://youtube.com/watch?v={item['id']['videoId']}",
         }
         for item in items
         if item["id"].get("videoId")
     ]
+    # Also search "short" duration as backup — some great clips are under 4 min
+    if len(results) < 3:
+        params["videoDuration"] = "short"
+        try:
+            resp2 = httpx.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=15)
+            resp2.raise_for_status()
+            for item in resp2.json().get("items", []):
+                vid_id = item["id"].get("videoId")
+                if vid_id and not any(r["id"] == vid_id for r in results):
+                    results.append({
+                        "id": vid_id,
+                        "title": item["snippet"]["title"],
+                        "channel": item["snippet"].get("channelTitle", ""),
+                        "url": f"https://youtube.com/watch?v={vid_id}",
+                    })
+        except Exception:
+            pass
+    return results
+
+
+def _pick_best_search_result(results: list[dict], movie_show: str, scene: str, api_key: str) -> dict:
+    """Use GPT to pick the best YouTube result — prefer actual scene clips over trailers/compilations."""
+    if len(results) == 1:
+        return results[0]
+
+    numbered = "\n".join(
+        f"{i+1}. \"{r['title']}\" by {r['channel']}"
+        for i, r in enumerate(results[:8])
+    )
+    prompt = (
+        f"Pick the best YouTube video to clip for a TikTok/Reels short.\n\n"
+        f"Movie/Show: {movie_show}\n"
+        f"Scene we want: {scene}\n\n"
+        f"Results:\n{numbered}\n\n"
+        f"RULES:\n"
+        f"- Pick an actual SCENE CLIP with dialogue and faces, not a trailer or compilation\n"
+        f"- Prefer channels like Movieclips, Binge Society, or official movie channels\n"
+        f"- Avoid fan edits, reaction videos, reviews, or commentary\n"
+        f"- Longer clips are better — more dialogue to choose from\n\n"
+        f"Reply with ONLY the number (e.g. 3). Nothing else."
+    )
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=5,
+        temperature=0.1,
+    )
+    answer = resp.choices[0].message.content.strip()
+    try:
+        idx = int(answer) - 1
+        if 0 <= idx < len(results):
+            log.info("AI picked result #%d: %s", idx + 1, results[idx]["title"])
+            return results[idx]
+    except ValueError:
+        pass
+    log.warning("Could not parse AI pick %r, using first result", answer)
+    return results[0]
 
 
 def search_youtube(movie_show: str, scene: str, work_dir: Path, openai_key: str = "") -> str:
-    """Search YouTube using official API + AI-crafted queries."""
+    """Search YouTube using official API + AI-crafted queries, then AI-pick the best result."""
     settings = get_settings()
 
     if not settings.youtube_api_key:
@@ -126,19 +185,34 @@ def search_youtube(movie_show: str, scene: str, work_dir: Path, openai_key: str 
         queries = [f"{movie_show} {scene[:30]} scene clip"]
     queries.append(f"{movie_show} scene clip")
 
+    # Collect all results across queries, deduplicate
+    all_results = []
+    seen_ids = set()
     for q in queries:
         log.info("YouTube API search: %s", q)
         try:
             results = _youtube_api_search(q, settings.youtube_api_key)
-            if results:
-                best = results[0]
-                log.info("YouTube API found: %s (%s)", best["title"], best["url"])
-                return best["url"]
+            for r in results:
+                if r["id"] not in seen_ids:
+                    all_results.append(r)
+                    seen_ids.add(r["id"])
         except Exception as e:
             log.warning("YouTube API search failed for %r: %s", q, e)
             continue
 
-    raise ValueError(f"No YouTube results for: {movie_show} — {scene}")
+    if not all_results:
+        raise ValueError(f"No YouTube results for: {movie_show} — {scene}")
+
+    log.info("Found %d unique results across all queries", len(all_results))
+
+    # Let AI pick the best result
+    if openai_key and len(all_results) > 1:
+        best = _pick_best_search_result(all_results, movie_show, scene, openai_key)
+    else:
+        best = all_results[0]
+
+    log.info("Selected: %s (%s)", best["title"], best["url"])
+    return best["url"]
 
 
 def download_youtube(url: str, out_path: Path) -> Path:
@@ -149,12 +223,12 @@ def download_youtube(url: str, out_path: Path) -> Path:
     cmd = [
         "yt-dlp",
         "--remote-components", "ejs:github",
-        "-f", "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
+        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio",
         "-o", out_template,
         "--merge-output-format", "mp4",
         "--no-playlist",
         "--socket-timeout", "30",
-        "--extractor-args", "youtube:player_client=web,mweb",
+        "--extractor-args", "youtube:player_client=web",
     ]
     if cookie_file:
         cmd.extend(["--cookies", str(cookie_file)])
@@ -553,7 +627,7 @@ def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
         "--sub-format", "vtt",
         "-o", sub_out,
         "--no-playlist",
-        "--extractor-args", "youtube:player_client=web,mweb",
+        "--extractor-args", "youtube:player_client=web",
     ]
     if cookie_file:
         cmd.extend(["--cookies", str(cookie_file)])
