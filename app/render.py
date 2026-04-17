@@ -64,6 +64,37 @@ def _write_cookies_file(work_dir: Path) -> Path | None:
     return cookie_path
 
 
+def search_youtube(movie_show: str, scene: str, work_dir: Path) -> str:
+    """Search YouTube for a clip and return the best URL."""
+    query = f"{movie_show} {scene} scene clip".strip()
+    log.info("Searching YouTube for: %s", query)
+    cookie_file = _write_cookies_file(work_dir)
+    ydl_opts = {
+        "quiet": True,
+        "noplaylist": True,
+        "extract_flat": False,
+        "default_search": "ytsearch5",  # get top 5 results
+        "skip_download": True,
+    }
+    if cookie_file:
+        ydl_opts["cookiefile"] = str(cookie_file)
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        result = ydl.extract_info(f"ytsearch5:{query}", download=False)
+
+    entries = result.get("entries", [])
+    if not entries:
+        raise ValueError(f"No YouTube results for: {query}")
+
+    # Pick the best result: prefer shorter videos (clips, not full movies)
+    # Filter to videos under 10 minutes, then pick the first
+    short = [e for e in entries if e.get("duration", 9999) < 600]
+    best = short[0] if short else entries[0]
+    url = best.get("webpage_url") or f"https://youtube.com/watch?v={best['id']}"
+    log.info("YouTube search picked: %s (%s, %ds)", best.get("title"), url, best.get("duration", 0))
+    return url
+
+
 def download_youtube(url: str, out_path: Path) -> Path:
     cookie_file = _write_cookies_file(out_path.parent)
     ydl_opts = {
@@ -390,7 +421,17 @@ def run_render_job(job_id: str, req: dict) -> dict:
     srt = work / "captions.srt"
     final = work / f"{_slug(req.get('movie_show', 'clip'))}_{req['row_number']}.mp4"
 
-    # If no timestamps provided, AI picks the best clip from YouTube captions
+    # Auto-search YouTube if no URL provided
+    youtube_url = req.get("youtube_url", "").strip()
+    if not youtube_url:
+        movie_show = req.get("movie_show", "").strip()
+        scene_desc = req.get("scene_description", "").strip()
+        if not movie_show and not scene_desc:
+            raise ValueError("Need either a YouTube URL or Movie/Show + Scene Description")
+        youtube_url = search_youtube(movie_show, scene_desc, work)
+        log.info("[%s] Auto-found YouTube URL: %s", job_id, youtube_url)
+
+    # Auto-pick clip timestamps if not provided
     clip_start_raw = req.get("clip_start", "").strip()
     clip_end_raw = req.get("clip_end", "").strip()
 
@@ -401,15 +442,15 @@ def run_render_job(job_id: str, req: dict) -> dict:
             raise ValueError(f"clip_end ({end_s}) must be > clip_start ({start_s})")
     else:
         start_s, end_s = auto_pick_clip(
-            req["youtube_url"],
+            youtube_url,
             req.get("scene_description", ""),
             work,
             settings.openai_api_key,
         )
         log.info("[%s] AI auto-picked clip: %.1fs - %.1fs", job_id, start_s, end_s)
 
-    log.info("[%s] Downloading %s", job_id, req["youtube_url"])
-    src = download_youtube(req["youtube_url"], raw)
+    log.info("[%s] Downloading %s", job_id, youtube_url)
+    src = download_youtube(youtube_url, raw)
 
     log.info("[%s] Trimming %.2fs-%.2fs and reframing", job_id, start_s, end_s)
     trim_and_reframe(src, trimmed, start_s, end_s,
