@@ -187,15 +187,62 @@ def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
 
 # ---- Whisper ----------------------------------------------------------------
 
+def _fmt_srt_ts(seconds: float) -> str:
+    """Format seconds as SRT timestamp: HH:MM:SS,mmm"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
 def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
+    """Transcribe with word-level timestamps → short subtitle chunks (3-5 words)."""
     client = OpenAI(api_key=api_key)
     with open(src, "rb") as f:
         resp = client.audio.transcriptions.create(
             model="whisper-1",
             file=f,
-            response_format="srt",
+            response_format="verbose_json",
+            timestamp_granularities=["word"],
         )
-    srt_out.write_text(resp, encoding="utf-8")
+
+    words = resp.words or []
+    if not words:
+        srt_out.write_text("", encoding="utf-8")
+        return srt_out
+
+    # Group words into short chunks — break on punctuation or every ~4 words
+    MAX_WORDS = 4
+    chunks = []
+    buf = []
+    for w in words:
+        buf.append(w)
+        ends_sentence = w.word.rstrip().endswith((".", "?", "!", ","))
+        if len(buf) >= MAX_WORDS or ends_sentence:
+            chunks.append({
+                "start": buf[0].start,
+                "end": buf[-1].end,
+                "text": " ".join(b.word for b in buf).strip(),
+            })
+            buf = []
+    if buf:
+        chunks.append({
+            "start": buf[0].start,
+            "end": buf[-1].end,
+            "text": " ".join(b.word for b in buf).strip(),
+        })
+
+    # Build SRT
+    srt_lines = []
+    for i, c in enumerate(chunks, 1):
+        srt_lines.append(str(i))
+        srt_lines.append(f"{_fmt_srt_ts(c['start'])} --> {_fmt_srt_ts(c['end'])}")
+        srt_lines.append(c["text"])
+        srt_lines.append("")
+
+    srt_out.write_text("\n".join(srt_lines), encoding="utf-8")
+    log.info("Generated %d subtitle chunks from %d words", len(chunks), len(words))
     return srt_out
 
 
