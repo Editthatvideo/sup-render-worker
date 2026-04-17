@@ -7,3 +7,4 @@ venv/
 .vscode/
 /tmp/
 *.log
+client_secret_*.json

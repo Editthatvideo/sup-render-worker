@@ -1,11 +1,10 @@
-"""Upload rendered clips to a shared Google Drive folder via a service account."""
+"""Upload rendered clips to Google Drive via OAuth2 refresh token (personal Gmail compatible)."""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -13,22 +12,19 @@ from .config import get_settings
 
 log = logging.getLogger("render-worker.drive")
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file",
-          "https://www.googleapis.com/auth/drive"]
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 
 def _credentials():
     settings = get_settings()
-    raw = settings.gdrive_service_account_json
-    # Accept either a JSON blob or a path
-    if raw.strip().startswith("{"):
-        info = json.loads(raw)
-    else:
-        info = json.loads(Path(raw).read_text())
-    creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-    # Impersonate the user so uploads count against their storage quota
-    if settings.gdrive_impersonate_email:
-        creds = creds.with_subject(settings.gdrive_impersonate_email)
+    creds = Credentials(
+        token=None,
+        refresh_token=settings.gdrive_refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.gdrive_client_id,
+        client_secret=settings.gdrive_client_secret,
+        scopes=SCOPES,
+    )
     return creds
 
 
@@ -48,7 +44,7 @@ def upload_file(local_path: Path, name: str) -> dict:
         supportsAllDrives=True,
     ).execute()
 
-    # Make link-accessible so n8n / you can view without ACL changes
+    # Make link-accessible
     try:
         svc.permissions().create(
             fileId=f["id"],
@@ -56,6 +52,6 @@ def upload_file(local_path: Path, name: str) -> dict:
             supportsAllDrives=True,
         ).execute()
     except Exception:
-        log.warning("Could not set anyone-with-link permission; file is private to service account.")
+        log.warning("Could not set anyone-with-link permission; file may be private.")
 
     return f

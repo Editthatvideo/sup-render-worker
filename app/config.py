@@ -15,10 +15,11 @@ class Settings(BaseModel):
     n8n_callback_url: str           # POST here when render done
     n8n_callback_auth: str = ""     # optional Bearer token n8n expects
 
-    # Google Drive
-    gdrive_service_account_json: str   # raw JSON string OR path to file
+    # Google Drive (OAuth2)
+    gdrive_client_id: str
+    gdrive_client_secret: str
+    gdrive_refresh_token: str
     gdrive_output_folder_id: str       # target folder
-    gdrive_impersonate_email: str = ""  # upload as this user (uses their storage quota)
 
     # Rendering
     output_width: int = 1080
@@ -38,9 +39,10 @@ def get_settings() -> Settings:
         openai_api_key=os.environ["OPENAI_API_KEY"],
         n8n_callback_url=os.environ["N8N_CALLBACK_URL"],
         n8n_callback_auth=os.environ.get("N8N_CALLBACK_AUTH", ""),
-        gdrive_service_account_json=os.environ["GDRIVE_SERVICE_ACCOUNT_JSON"],
+        gdrive_client_id=os.environ["GDRIVE_CLIENT_ID"],
+        gdrive_client_secret=os.environ["GDRIVE_CLIENT_SECRET"],
+        gdrive_refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"],
         gdrive_output_folder_id=os.environ["GDRIVE_OUTPUT_FOLDER_ID"],
-        gdrive_impersonate_email=os.environ.get("GDRIVE_IMPERSONATE_EMAIL", ""),
         output_width=int(os.environ.get("OUTPUT_WIDTH", 1080)),
         output_height=int(os.environ.get("OUTPUT_HEIGHT", 1920)),
         headline_font_size=int(os.environ.get("HEADLINE_FONT_SIZE", 72)),
