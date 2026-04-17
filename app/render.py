@@ -249,6 +249,19 @@ def _detect_face_x(src: Path, start_s: float, duration: float) -> float | None:
     return avg_x
 
 
+def _get_video_width(src: Path) -> int | None:
+    """Get video width via ffprobe."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width", "-of", "csv=p=0", str(src)],
+            capture_output=True, text=True, timeout=10,
+        )
+        return int(r.stdout.strip())
+    except Exception:
+        return None
+
+
 def trim_and_reframe(src: Path, dst: Path, start_s: float, end_s: float, w: int, h: int):
     """Trim [start_s, end_s] and reframe to w x h with face-aware cropping."""
     duration = max(0.1, end_s - start_s)
@@ -257,12 +270,28 @@ def trim_and_reframe(src: Path, dst: Path, start_s: float, end_s: float, w: int,
     face_x = _detect_face_x(src, start_s, duration)
 
     if face_x is not None:
-        # Face-aware crop: position crop window so face is centered
-        # crop_x expression: face_x ratio mapped to crop offset, clamped to valid range
-        # After scaling, the width is wider than target. We offset based on face position.
-        crop_x = f"max(0,min(iw-{w},{face_x}*iw-{w}/2))"
-        vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}:{crop_x}:0"
-        log.info("Smart crop — face at %.0f%%, crop_x=%s", face_x * 100, crop_x)
+        # Calculate the scaled width (after scaling height to fill target)
+        src_w = _get_video_width(src)
+        if src_w and src_w > 0:
+            # Figure out what width will be after scaling to target height
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0", str(src)],
+                capture_output=True, text=True, timeout=10,
+            )
+            parts = r.stdout.strip().split(",")
+            src_w, src_h = int(parts[0]), int(parts[1])
+            # After scaling to fill target height, width becomes:
+            scaled_w = int(src_w * (h / src_h))
+            # Make sure scaled_w is even (ffmpeg requirement)
+            scaled_w = scaled_w + (scaled_w % 2)
+            # Calculate crop X: center on face position, clamp to valid range
+            crop_x = int(face_x * scaled_w - w / 2)
+            crop_x = max(0, min(crop_x, scaled_w - w))
+            vf = f"scale={scaled_w}:{h},crop={w}:{h}:{crop_x}:0"
+            log.info("Smart crop — face at %.0f%%, scaled_w=%d, crop_x=%d", face_x * 100, scaled_w, crop_x)
+        else:
+            vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}"
     else:
         # Fallback: center crop
         vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}"
