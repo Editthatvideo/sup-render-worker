@@ -87,55 +87,58 @@ def _build_search_query(movie_show: str, scene: str, api_key: str) -> list[str]:
     return queries or [f"{movie_show} scene clip"]
 
 
-def _yt_search(query: str, work_dir: Path, num_results: int = 5) -> list[dict]:
-    """Run a single YouTube search, return entries."""
-    cookie_file = _write_cookies_file(work_dir)
-    ydl_opts = {
-        "quiet": True,
-        "noplaylist": True,
-        "extract_flat": False,
-        "skip_download": True,
+def _youtube_api_search(query: str, yt_api_key: str, max_results: int = 5) -> list[dict]:
+    """Search YouTube using the official Data API v3 — no cookies needed."""
+    import httpx
+    params = {
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "videoDuration": "short",  # under 4 min — clips, not full movies
+        "maxResults": max_results,
+        "key": yt_api_key,
     }
-    if cookie_file:
-        ydl_opts["cookiefile"] = str(cookie_file)
+    resp = httpx.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=15)
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
+    return [
+        {
+            "id": item["id"]["videoId"],
+            "title": item["snippet"]["title"],
+            "url": f"https://youtube.com/watch?v={item['id']['videoId']}",
+        }
+        for item in items
+        if item["id"].get("videoId")
+    ]
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        result = ydl.extract_info(f"ytsearch{num_results}:{query}", download=False)
-    return result.get("entries", [])
 
+def search_youtube(movie_show: str, scene: str, work_dir: Path, openai_key: str = "") -> str:
+    """Search YouTube using official API + AI-crafted queries."""
+    settings = get_settings()
 
-def search_youtube(movie_show: str, scene: str, work_dir: Path, api_key: str = "") -> str:
-    """Search YouTube using AI-crafted queries, return best clip URL."""
-    # Build smart queries with GPT, fall back to simple concat
-    if api_key:
-        queries = _build_search_query(movie_show, scene, api_key)
+    if not settings.youtube_api_key:
+        raise ValueError("YOUTUBE_API_KEY not set — needed for YouTube search")
+
+    # Build smart queries with GPT
+    if openai_key:
+        queries = _build_search_query(movie_show, scene, openai_key)
     else:
         queries = [f"{movie_show} {scene[:30]} scene clip"]
-
-    # Also add a simple fallback query
     queries.append(f"{movie_show} scene clip")
 
-    all_entries = []
     for q in queries:
-        log.info("Searching YouTube for: %s", q)
+        log.info("YouTube API search: %s", q)
         try:
-            entries = _yt_search(q, work_dir)
-            if entries:
-                all_entries.extend(entries)
-                break  # first query that returns results wins
+            results = _youtube_api_search(q, settings.youtube_api_key)
+            if results:
+                best = results[0]
+                log.info("YouTube API found: %s (%s)", best["title"], best["url"])
+                return best["url"]
         except Exception as e:
-            log.warning("Search failed for %r: %s", q, e)
+            log.warning("YouTube API search failed for %r: %s", q, e)
             continue
 
-    if not all_entries:
-        raise ValueError(f"No YouTube results for: {movie_show} — {scene}")
-
-    # Prefer shorter videos (clips, not full movies) — under 10 minutes
-    short = [e for e in all_entries if e.get("duration", 9999) < 600]
-    best = short[0] if short else all_entries[0]
-    url = best.get("webpage_url") or f"https://youtube.com/watch?v={best['id']}"
-    log.info("YouTube search picked: %s (%s, %ds)", best.get("title"), url, best.get("duration", 0))
-    return url
+    raise ValueError(f"No YouTube results for: {movie_show} — {scene}")
 
 
 def download_youtube(url: str, out_path: Path) -> Path:

@@ -28,8 +28,9 @@ class Settings(BaseModel):
     caption_font_size: int = 42
     font_path: str = "/usr/share/fonts/truetype/custom/Anton-Regular.ttf"
 
-    # YouTube cookies (base64-encoded Netscape cookies.txt)
-    youtube_cookies_b64: str = ""
+    # YouTube
+    youtube_api_key: str = ""       # Data API v3 for search
+    youtube_cookies_b64: str = ""   # cookies for yt-dlp download
 
     # Runtime
     work_dir: str = "/tmp/renders"
@@ -51,6 +52,7 @@ def get_settings() -> Settings:
         headline_font_size=int(os.environ.get("HEADLINE_FONT_SIZE", 44)),
         caption_font_size=int(os.environ.get("CAPTION_FONT_SIZE", 54)),
         font_path=os.environ.get("FONT_PATH", "/usr/share/fonts/truetype/custom/Anton-Regular.ttf"),
+        youtube_api_key=os.environ.get("YOUTUBE_API_KEY", ""),
         youtube_cookies_b64=os.environ.get("YOUTUBE_COOKIES_B64", ""),
         work_dir=os.environ.get("WORK_DIR", "/tmp/renders"),
     )
