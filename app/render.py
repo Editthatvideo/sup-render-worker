@@ -144,7 +144,7 @@ def search_youtube(movie_show: str, scene: str, work_dir: Path, openai_key: str 
 def download_youtube(url: str, out_path: Path) -> Path:
     cookie_file = _write_cookies_file(out_path.parent)
     ydl_opts = {
-        "format": "bestvideo[height<=1080]+bestaudio/best",
+        "format": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
         "outtmpl": str(out_path.with_suffix(".%(ext)s")),
         "merge_output_format": "mp4",
         "quiet": True,
@@ -404,8 +404,12 @@ def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
     if cookie_file:
         ydl_opts["cookiefile"] = str(cookie_file)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(url, download=False)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(url, download=False)
+    except Exception as e:
+        log.warning("Could not fetch YouTube captions: %s", e)
+        return None
 
     # Find the subtitle file yt-dlp wrote
     for ext in ("en.vtt", "en.srt"):
