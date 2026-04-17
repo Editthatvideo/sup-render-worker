@@ -64,32 +64,75 @@ def _write_cookies_file(work_dir: Path) -> Path | None:
     return cookie_path
 
 
-def search_youtube(movie_show: str, scene: str, work_dir: Path) -> str:
-    """Search YouTube for a clip and return the best URL."""
-    query = f"{movie_show} {scene} scene clip".strip()
-    log.info("Searching YouTube for: %s", query)
+def _build_search_query(movie_show: str, scene: str, api_key: str) -> list[str]:
+    """Use GPT to craft 2-3 smart YouTube search queries."""
+    prompt = (
+        f"You are a YouTube search expert. I need to find a specific movie/TV clip.\n\n"
+        f"Movie/Show: {movie_show}\n"
+        f"Scene: {scene}\n\n"
+        f"Generate 3 YouTube search queries that would find this clip. "
+        f"Keep them short (3-6 words). Use the show name + key scene words. "
+        f"Think about what clip channels like Movieclips or Binge Society would title it.\n\n"
+        f"Reply with ONLY the 3 queries, one per line. No numbers, no quotes."
+    )
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=100,
+        temperature=0.5,
+    )
+    queries = [q.strip() for q in resp.choices[0].message.content.strip().splitlines() if q.strip()]
+    log.info("AI generated search queries: %s", queries)
+    return queries or [f"{movie_show} scene clip"]
+
+
+def _yt_search(query: str, work_dir: Path, num_results: int = 5) -> list[dict]:
+    """Run a single YouTube search, return entries."""
     cookie_file = _write_cookies_file(work_dir)
     ydl_opts = {
         "quiet": True,
         "noplaylist": True,
         "extract_flat": False,
-        "default_search": "ytsearch5",  # get top 5 results
         "skip_download": True,
     }
     if cookie_file:
         ydl_opts["cookiefile"] = str(cookie_file)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        result = ydl.extract_info(f"ytsearch5:{query}", download=False)
+        result = ydl.extract_info(f"ytsearch{num_results}:{query}", download=False)
+    return result.get("entries", [])
 
-    entries = result.get("entries", [])
-    if not entries:
-        raise ValueError(f"No YouTube results for: {query}")
 
-    # Pick the best result: prefer shorter videos (clips, not full movies)
-    # Filter to videos under 10 minutes, then pick the first
-    short = [e for e in entries if e.get("duration", 9999) < 600]
-    best = short[0] if short else entries[0]
+def search_youtube(movie_show: str, scene: str, work_dir: Path, api_key: str = "") -> str:
+    """Search YouTube using AI-crafted queries, return best clip URL."""
+    # Build smart queries with GPT, fall back to simple concat
+    if api_key:
+        queries = _build_search_query(movie_show, scene, api_key)
+    else:
+        queries = [f"{movie_show} {scene[:30]} scene clip"]
+
+    # Also add a simple fallback query
+    queries.append(f"{movie_show} scene clip")
+
+    all_entries = []
+    for q in queries:
+        log.info("Searching YouTube for: %s", q)
+        try:
+            entries = _yt_search(q, work_dir)
+            if entries:
+                all_entries.extend(entries)
+                break  # first query that returns results wins
+        except Exception as e:
+            log.warning("Search failed for %r: %s", q, e)
+            continue
+
+    if not all_entries:
+        raise ValueError(f"No YouTube results for: {movie_show} — {scene}")
+
+    # Prefer shorter videos (clips, not full movies) — under 10 minutes
+    short = [e for e in all_entries if e.get("duration", 9999) < 600]
+    best = short[0] if short else all_entries[0]
     url = best.get("webpage_url") or f"https://youtube.com/watch?v={best['id']}"
     log.info("YouTube search picked: %s (%s, %ds)", best.get("title"), url, best.get("duration", 0))
     return url
@@ -428,7 +471,7 @@ def run_render_job(job_id: str, req: dict) -> dict:
         scene_desc = req.get("scene_description", "").strip()
         if not movie_show and not scene_desc:
             raise ValueError("Need either a YouTube URL or Movie/Show + Scene Description")
-        youtube_url = search_youtube(movie_show, scene_desc, work)
+        youtube_url = search_youtube(movie_show, scene_desc, work, settings.openai_api_key)
         log.info("[%s] Auto-found YouTube URL: %s", job_id, youtube_url)
 
     # Auto-pick clip timestamps if not provided
