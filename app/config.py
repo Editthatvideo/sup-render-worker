@@ -24,7 +24,7 @@ class Settings(BaseModel):
     # Rendering
     output_width: int = 1080
     output_height: int = 1920
-    headline_font_size: int = 58
+    headline_font_size: int = 44
     caption_font_size: int = 42
     font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVu-Sans-Bold.ttf"
 
@@ -45,7 +45,7 @@ def get_settings() -> Settings:
         gdrive_output_folder_id=os.environ["GDRIVE_OUTPUT_FOLDER_ID"],
         output_width=int(os.environ.get("OUTPUT_WIDTH", 1080)),
         output_height=int(os.environ.get("OUTPUT_HEIGHT", 1920)),
-        headline_font_size=int(os.environ.get("HEADLINE_FONT_SIZE", 72)),
+        headline_font_size=int(os.environ.get("HEADLINE_FONT_SIZE", 44)),
         caption_font_size=int(os.environ.get("CAPTION_FONT_SIZE", 54)),
         font_path=os.environ.get("FONT_PATH", "/usr/share/fonts/truetype/dejavu/DejaVu-Sans-Bold.ttf"),
         work_dir=os.environ.get("WORK_DIR", "/tmp/renders"),

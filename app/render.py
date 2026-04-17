@@ -96,6 +96,21 @@ def trim_and_reframe(src: Path, dst: Path, start_s: float, end_s: float, w: int,
     return dst
 
 
+def _wrap_text(text: str, max_chars: int = 25) -> str:
+    """Word-wrap text into lines of ~max_chars, joined by newlines."""
+    words = text.split()
+    lines, current = [], ""
+    for w in words:
+        if current and len(current) + 1 + len(w) > max_chars:
+            lines.append(current)
+            current = w
+        else:
+            current = f"{current} {w}" if current else w
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
 def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
     """Burn SRT subtitles at bottom + a headline card at top."""
     filters = []
@@ -109,20 +124,21 @@ def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
         )
         filters.append(f"subtitles={shlex.quote(str(srt))}:force_style='{style}'")
 
-    # Headline via drawtext (top of frame, word-wrapped manually)
+    # Headline via drawtext (top of frame, word-wrapped)
     if headline.strip():
+        wrapped = _wrap_text(headline, max_chars=22)
         safe = (
-            headline.replace("\\", "\\\\")
-                    .replace(":", "\\:")
-                    .replace("'", "\u2019")
+            wrapped.replace("\\", "\\\\")
+                   .replace(":", "\\:")
+                   .replace("'", "\u2019")
         )
         filters.append(
             f"drawtext=fontfile={settings.font_path}:"
             f"text='{safe}':"
             f"fontsize={settings.headline_font_size}:fontcolor=white:"
             f"box=1:boxcolor=black@0.55:boxborderw=24:"
-            f"x=(w-text_w)/2:y=120:"
-            f"line_spacing=10"
+            f"x=(w-text_w)/2:y=80:"
+            f"line_spacing=14"
         )
 
     vf = ",".join(filters) if filters else "null"
