@@ -8,5 +8,5 @@ openai==1.51.0
 google-api-python-client==2.147.0
 google-auth==2.35.0
 google-auth-httplib2==0.2.0
-opencv-python-headless==4.9.0.80
-numpy>=1.26.0
+opencv-python-headless>=4.10.0
+numpy>=1.26.0,<2.0.0
