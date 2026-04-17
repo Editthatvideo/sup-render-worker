@@ -141,66 +141,46 @@ def search_youtube(movie_show: str, scene: str, work_dir: Path, openai_key: str 
     raise ValueError(f"No YouTube results for: {movie_show} — {scene}")
 
 
-def _try_ytdlp(url: str, out_path: Path, use_cookies: bool, player_clients: list[str]) -> Path:
-    """Single yt-dlp attempt with given settings."""
-    ydl_opts = {
-        "format": "best[height<=1080]/best",  # single stream — avoids merge issues
-        "outtmpl": str(out_path.with_suffix(".%(ext)s")),
-        "merge_output_format": "mp4",
-        "quiet": False,
-        "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": player_clients}},
-        "socket_timeout": 30,
-        "remote_components": "ejs:github",  # solve YouTube JS challenges via deno
-    }
-    if use_cookies:
-        cookie_file = _write_cookies_file(out_path.parent)
-        if cookie_file:
-            ydl_opts["cookiefile"] = str(cookie_file)
-            log.info("Using cookies file (%d bytes)", cookie_file.stat().st_size)
-        else:
-            log.warning("Cookies requested but YOUTUBE_COOKIES_B64 is empty — skipping")
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        final = Path(ydl.prepare_filename(info)).with_suffix(".mp4")
-        if not final.exists():
-            candidates = list(out_path.parent.glob(out_path.stem + ".*"))
-            if not candidates:
-                raise FileNotFoundError("yt-dlp produced no file")
-            final = candidates[0]
-    return final
-
-
 def download_youtube(url: str, out_path: Path) -> Path:
-    """Download with multiple fallback strategies — cookies are LAST resort."""
-    strategies = [
-        # 1. No cookies, web client — works for most public clips
-        {"use_cookies": False, "player_clients": ["web"]},
-        # 2. No cookies, mobile web client
-        {"use_cookies": False, "player_clients": ["mweb"]},
-        # 3. With cookies, web client — last resort
-        {"use_cookies": True, "player_clients": ["web", "mweb"]},
+    """Download via yt-dlp CLI with --remote-components for JS challenge solving."""
+    cookie_file = _write_cookies_file(out_path.parent)
+    out_template = str(out_path.with_suffix(".%(ext)s"))
+
+    cmd = [
+        "yt-dlp",
+        "--remote-components", "ejs:github",
+        "-f", "best[height<=1080]/best",
+        "-o", out_template,
+        "--merge-output-format", "mp4",
+        "--no-playlist",
+        "--socket-timeout", "30",
+        "--extractor-args", "youtube:player_client=web,mweb",
     ]
+    if cookie_file:
+        cmd.extend(["--cookies", str(cookie_file)])
+        log.info("Using cookies file (%d bytes)", cookie_file.stat().st_size)
+    cmd.append(url)
 
-    last_error = None
-    for i, strat in enumerate(strategies, 1):
-        label = f"Strategy {i}: cookies={strat['use_cookies']}, clients={strat['player_clients']}"
-        log.info("Download attempt — %s", label)
-        try:
-            final = _try_ytdlp(url, out_path, **strat)
-            log.info("Downloaded to %s via %s", final, label)
-            return final
-        except Exception as e:
-            last_error = e
-            log.warning("Failed (%s): %s", label, e)
-            # Clean up partial files before next attempt
-            for f in out_path.parent.glob(out_path.stem + ".*"):
-                try:
-                    f.unlink()
-                except OSError:
-                    pass
+    log.info("Downloading: %s", " ".join(shlex.quote(c) for c in cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    log.info("yt-dlp stdout: %s", result.stdout[-2000:] if result.stdout else "(empty)")
+    if result.stderr:
+        log.info("yt-dlp stderr: %s", result.stderr[-2000:])
 
-    raise RuntimeError(f"All download strategies failed for {url}: {last_error}")
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp failed (exit {result.returncode}): {result.stderr[-500:]}")
+
+    # Find the output file
+    final = out_path.with_suffix(".mp4")
+    if not final.exists():
+        candidates = list(out_path.parent.glob(out_path.stem + ".*"))
+        candidates = [c for c in candidates if c.suffix not in (".txt", ".part")]
+        if not candidates:
+            raise FileNotFoundError(f"yt-dlp produced no file. stdout: {result.stdout[-300:]}")
+        final = candidates[0]
+
+    log.info("Downloaded to %s", final)
+    return final
 
 
 # ---- FFmpeg ops -------------------------------------------------------------
