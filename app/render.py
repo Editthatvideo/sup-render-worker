@@ -539,31 +539,40 @@ def pick_best_caption(ideas: list[str], scene: str, api_key: str) -> str:
 # ---- Auto-Clip Picker -------------------------------------------------------
 
 def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
-    """Grab YouTube's auto-captions without downloading the video."""
-    ydl_opts = {
-        "skip_download": True,
-        "writeautomaticsub": True,
-        "writesubtitles": True,
-        "subtitleslangs": ["en"],
-        "subtitlesformat": "vtt",
-        "outtmpl": str(work_dir / "subs"),
-        "quiet": True,
-        "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": ["web"]}},
-    }
+    """Grab YouTube's auto-captions via CLI (supports --remote-components)."""
+    cookie_file = _write_cookies_file(work_dir)
+    sub_out = str(work_dir / "subs")
 
+    cmd = [
+        "yt-dlp",
+        "--remote-components", "ejs:github",
+        "--skip-download",
+        "--write-auto-sub",
+        "--write-sub",
+        "--sub-lang", "en",
+        "--sub-format", "vtt",
+        "-o", sub_out,
+        "--no-playlist",
+        "--extractor-args", "youtube:player_client=web,mweb",
+    ]
+    if cookie_file:
+        cmd.extend(["--cookies", str(cookie_file)])
+    cmd.append(url)
+
+    log.info("Fetching transcript: %s", " ".join(shlex.quote(c) for c in cmd))
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=False)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            log.warning("Transcript fetch failed (exit %d): %s", result.returncode, result.stderr[-500:])
     except Exception as e:
         log.warning("Could not fetch YouTube captions: %s", e)
         return None
 
     # Find the subtitle file yt-dlp wrote
-    for ext in ("en.vtt", "en.srt"):
-        sub_file = work_dir / f"subs.{ext}"
-        if sub_file.exists():
-            raw = sub_file.read_text(encoding="utf-8")
+    for pattern in ("subs.en.vtt", "subs.en.srt", "subs*.en.vtt", "subs*.en.srt"):
+        matches = list(work_dir.glob(pattern))
+        if matches:
+            raw = matches[0].read_text(encoding="utf-8")
             # Strip VTT headers and timestamps, keep just the text lines
             lines = []
             for line in raw.splitlines():
@@ -575,7 +584,10 @@ def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
                 cleaned = re.sub(r"<[^>]+>", "", line).strip()
                 if cleaned and cleaned not in lines[-1:]:  # dedup consecutive
                     lines.append(cleaned)
-            return " ".join(lines)
+            transcript = " ".join(lines)
+            log.info("Got transcript (%d chars): %s...", len(transcript), transcript[:200])
+            return transcript if transcript else None
+    log.warning("No subtitle files found after yt-dlp transcript fetch")
     return None
 
 
@@ -586,9 +598,9 @@ def auto_pick_clip(url: str, scene: str, work_dir: Path, api_key: str,
 
     transcript = _fetch_youtube_transcript(url, work_dir)
     if not transcript:
-        # No captions available — default to first 10 seconds
-        log.warning("No YouTube captions found, defaulting to 0-10s")
-        return 0.0, 10.0
+        # No captions available — skip past likely establishing shot
+        log.warning("No YouTube captions found — defaulting to 8-20s to skip establishing shots")
+        return 8.0, 20.0
 
     prompt = (
         f"You are a viral TikTok/Reels editor. Given a video transcript, pick the single "
