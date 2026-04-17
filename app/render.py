@@ -179,6 +179,17 @@ def download_youtube(url: str, out_path: Path) -> Path:
             raise FileNotFoundError(f"yt-dlp produced no file. stdout: {result.stdout[-300:]}")
         final = candidates[0]
 
+    # Log source resolution so we can diagnose quality issues
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,codec_name", "-of", "csv=p=0", str(final)],
+            capture_output=True, text=True, timeout=10,
+        )
+        log.info("Downloaded source info: %s  file=%s", probe.stdout.strip(), final)
+    except Exception:
+        pass
+
     log.info("Downloaded to %s", final)
     return final
 
@@ -278,35 +289,39 @@ def trim_and_reframe(src: Path, dst: Path, start_s: float, end_s: float, w: int,
     """Trim [start_s, end_s] and reframe to w x h with face-aware cropping."""
     duration = max(0.1, end_s - start_s)
 
+    # Get source dimensions first — needed for both face crop and quality logging
+    src_w, src_h = None, None
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", str(src)],
+            capture_output=True, text=True, timeout=10,
+        )
+        parts = r.stdout.strip().split(",")
+        src_w, src_h = int(parts[0]), int(parts[1])
+        log.info("Source dimensions: %dx%d → target %dx%d", src_w, src_h, w, h)
+        if src_h < 480:
+            log.warning("LOW QUALITY SOURCE: only %dp — output will look blurry!", src_h)
+    except Exception:
+        log.warning("Could not probe source dimensions")
+
     # Detect face position for smart crop
     face_x = _detect_face_x(src, start_s, duration)
 
-    if face_x is not None:
-        # Calculate the scaled width (after scaling height to fill target)
-        src_w = _get_video_width(src)
-        if src_w and src_w > 0:
-            # Figure out what width will be after scaling to target height
-            r = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height", "-of", "csv=p=0", str(src)],
-                capture_output=True, text=True, timeout=10,
-            )
-            parts = r.stdout.strip().split(",")
-            src_w, src_h = int(parts[0]), int(parts[1])
-            # After scaling to fill target height, width becomes:
-            scaled_w = int(src_w * (h / src_h))
-            # Make sure scaled_w is even (ffmpeg requirement)
-            scaled_w = scaled_w + (scaled_w % 2)
-            # Calculate crop X: center on face position, clamp to valid range
-            crop_x = int(face_x * scaled_w - w / 2)
-            crop_x = max(0, min(crop_x, scaled_w - w))
-            vf = f"scale={scaled_w}:{h},crop={w}:{h}:{crop_x}:0"
-            log.info("Smart crop — face at %.0f%%, scaled_w=%d, crop_x=%d", face_x * 100, scaled_w, crop_x)
-        else:
-            vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}"
+    if face_x is not None and src_w and src_h:
+        # After scaling to fill target height, width becomes:
+        scaled_w = int(src_w * (h / src_h))
+        # Make sure scaled_w is even (ffmpeg requirement)
+        scaled_w = scaled_w + (scaled_w % 2)
+        # Calculate crop X: center on face position, clamp to valid range
+        crop_x = int(face_x * scaled_w - w / 2)
+        crop_x = max(0, min(crop_x, scaled_w - w))
+        vf = f"scale={scaled_w}:{h},crop={w}:{h}:{crop_x}:0"
+        log.info("Smart crop — face at %.0f%%, scaled_w=%d, crop_x=%d", face_x * 100, scaled_w, crop_x)
     else:
         # Fallback: center crop
         vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}"
+        log.info("Using center crop fallback")
 
     cmd = [
         "ffmpeg", "-y",
@@ -314,8 +329,8 @@ def trim_and_reframe(src: Path, dst: Path, start_s: float, end_s: float, w: int,
         "-i", str(src),
         "-t", f"{duration:.3f}",
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "160k",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
+        "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         str(dst),
     ]
@@ -388,7 +403,7 @@ def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
     cmd = [
         "ffmpeg", "-y", "-i", str(src),
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
         "-c:a", "copy",
         "-movflags", "+faststart",
         str(dst),
@@ -580,8 +595,11 @@ def auto_pick_clip(url: str, scene: str, work_dir: Path, api_key: str,
         f"most compelling {min_dur}-{max_dur} second clip for maximum engagement.\n\n"
         f"Scene context: {scene or 'not provided'}\n\n"
         f"Full transcript:\n{transcript[:3000]}\n\n"
-        f"Pick the segment with the best hook — something surprising, funny, emotional, "
-        f"or controversial that makes viewers stop scrolling.\n\n"
+        f"CRITICAL RULES:\n"
+        f"- Pick a segment where someone is TALKING — we need faces on screen\n"
+        f"- NEVER pick the first 5 seconds (usually establishing shots with no people)\n"
+        f"- Pick dialogue, reactions, arguments — moments with visible emotion\n"
+        f"- The best hook is a person saying something surprising, funny, or controversial\n\n"
         f"Reply with ONLY two numbers on one line: START_SECONDS END_SECONDS\n"
         f"Example: 45 57\n"
         f"No other text."
@@ -604,12 +622,17 @@ def auto_pick_clip(url: str, scene: str, work_dir: Path, api_key: str,
             start = float(parts[0])
             end = float(parts[1])
             if end > start:
+                # Safety: if AI picked the very start, bump forward (establishing shots)
+                if start < 3.0:
+                    log.warning("AI picked near-start clip (%.1f-%.1f), bumping to avoid establishing shot", start, end)
+                    start = 5.0
+                    end = max(end, start + min_dur)
                 return start, end
         except ValueError:
             pass
 
-    log.warning("Could not parse AI clip response %r, defaulting to 0-10s", answer)
-    return 0.0, 10.0
+    log.warning("Could not parse AI clip response %r, defaulting to 5-15s", answer)
+    return 5.0, 15.0
 
 
 # ---- Orchestration ----------------------------------------------------------
