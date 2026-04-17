@@ -2,6 +2,7 @@
    yt-dlp → ffmpeg trim → 9:16 reframe → Whisper transcription → caption burn-in → Drive upload."""
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
@@ -52,7 +53,19 @@ def run(cmd: list[str], check=True):
 
 # ---- Download ---------------------------------------------------------------
 
+def _write_cookies_file(work_dir: Path) -> Path | None:
+    """Decode YOUTUBE_COOKIES_B64 env var to a Netscape cookies.txt file."""
+    settings = get_settings()
+    if not settings.youtube_cookies_b64:
+        return None
+    cookie_path = work_dir / "cookies.txt"
+    cookie_path.write_bytes(base64.b64decode(settings.youtube_cookies_b64))
+    log.info("Wrote YouTube cookies to %s", cookie_path)
+    return cookie_path
+
+
 def download_youtube(url: str, out_path: Path) -> Path:
+    cookie_file = _write_cookies_file(out_path.parent)
     ydl_opts = {
         "format": "bestvideo[height<=1080]+bestaudio/best",
         "outtmpl": str(out_path.with_suffix(".%(ext)s")),
@@ -60,6 +73,8 @@ def download_youtube(url: str, out_path: Path) -> Path:
         "quiet": True,
         "noplaylist": True,
     }
+    if cookie_file:
+        ydl_opts["cookiefile"] = str(cookie_file)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         # yt-dlp may pick a different extension; find the merged file
@@ -124,20 +139,27 @@ def burn_captions(src: Path, srt: Path, headline: str, dst: Path, settings):
         )
         filters.append(f"subtitles={shlex.quote(str(srt))}:force_style='{style}'")
 
-    # Headline via drawtext (top of frame, word-wrapped, outline style)
+    # Headline — one drawtext per line (avoids newline glyph rendering as □)
     if headline.strip():
-        wrapped = _wrap_text(headline.upper(), max_chars=20)
-        # Write to temp file to avoid shell escaping / encoding issues
-        headline_file = src.parent / "headline.txt"
-        headline_file.write_text(wrapped, encoding="utf-8")
-        filters.append(
-            f"drawtext=fontfile={settings.font_path}:"
-            f"textfile={shlex.quote(str(headline_file))}:"
-            f"fontsize={settings.headline_font_size}:fontcolor=white:"
-            f"borderw=4:bordercolor=black:"
-            f"x=(w-text_w)/2:y=80:"
-            f"line_spacing=14"
-        )
+        lines = _wrap_text(headline.upper(), max_chars=20).split("\n")
+        line_height = settings.headline_font_size + 14
+        y_start = 80
+        # Fade in over 0.8s: if(lt(t,0.8), t/0.8, 1)
+        # Commas escaped with \ for ffmpeg filter-graph parser
+        alpha_expr = "if(lt(t\\,0.8)\\,t/0.8\\,1)"
+
+        for i, line in enumerate(lines):
+            line_file = src.parent / f"headline_{i}.txt"
+            line_file.write_text(line, encoding="utf-8")
+            y = y_start + i * line_height
+            filters.append(
+                f"drawtext=fontfile={settings.font_path}:"
+                f"textfile={shlex.quote(str(line_file))}:"
+                f"fontsize={settings.headline_font_size}:fontcolor=white:"
+                f"borderw=4:bordercolor=black:"
+                f"x=(w-text_w)/2:y={y}:"
+                f"alpha='{alpha_expr}'"
+            )
 
     vf = ",".join(filters) if filters else "null"
     cmd = [
