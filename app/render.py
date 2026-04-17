@@ -144,11 +144,12 @@ def search_youtube(movie_show: str, scene: str, work_dir: Path, openai_key: str 
 def download_youtube(url: str, out_path: Path) -> Path:
     cookie_file = _write_cookies_file(out_path.parent)
     ydl_opts = {
-        "format": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
+        "format": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best/best",
         "outtmpl": str(out_path.with_suffix(".%(ext)s")),
         "merge_output_format": "mp4",
         "quiet": True,
         "noplaylist": True,
+        "extractor_args": {"youtube": {"player_client": ["web", "mweb", "ios"]}},
     }
     if cookie_file:
         ydl_opts["cookiefile"] = str(cookie_file)
@@ -400,6 +401,7 @@ def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
         "outtmpl": str(work_dir / "subs"),
         "quiet": True,
         "noplaylist": True,
+        "extractor_args": {"youtube": {"player_client": ["web", "mweb", "ios"]}},
     }
     if cookie_file:
         ydl_opts["cookiefile"] = str(cookie_file)
