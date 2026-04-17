@@ -185,11 +185,88 @@ def download_youtube(url: str, out_path: Path) -> Path:
 
 # ---- FFmpeg ops -------------------------------------------------------------
 
+def _detect_face_x(src: Path, start_s: float, duration: float) -> float | None:
+    """Sample a few frames and detect where faces are. Returns avg X ratio (0.0-1.0) or None."""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        log.warning("OpenCV not available — falling back to center crop")
+        return None
+
+    cascade_paths = [
+        "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml",
+        "/usr/local/share/opencv4/haarcascades/haarcascade_frontalface_default.xml",
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
+    ]
+    cascade_file = None
+    for p in cascade_paths:
+        if Path(p).exists():
+            cascade_file = p
+            break
+    if not cascade_file:
+        log.warning("No haarcascade file found — falling back to center crop")
+        return None
+
+    face_cascade = cv2.CascadeClassifier(cascade_file)
+
+    # Sample 3 frames spread across the clip
+    sample_times = [start_s + duration * t for t in (0.2, 0.5, 0.8)]
+    all_face_x = []
+
+    for t in sample_times:
+        # Extract a single frame
+        frame_path = src.parent / f"_face_probe_{t:.1f}.jpg"
+        probe_cmd = [
+            "ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", str(src),
+            "-frames:v", "1", "-q:v", "5", str(frame_path),
+        ]
+        r = subprocess.run(probe_cmd, capture_output=True, timeout=10)
+        if r.returncode != 0 or not frame_path.exists():
+            continue
+
+        img = cv2.imread(str(frame_path))
+        if img is None:
+            frame_path.unlink(missing_ok=True)
+            continue
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+
+        for (fx, fy, fw, fh) in faces:
+            # Store center X as ratio of frame width
+            center_x = (fx + fw / 2) / img.shape[1]
+            all_face_x.append(center_x)
+
+        frame_path.unlink(missing_ok=True)
+
+    if not all_face_x:
+        log.info("No faces detected — using center crop")
+        return None
+
+    avg_x = float(np.mean(all_face_x))
+    log.info("Detected %d faces across %d frames, avg X position: %.2f", len(all_face_x), len(sample_times), avg_x)
+    return avg_x
+
+
 def trim_and_reframe(src: Path, dst: Path, start_s: float, end_s: float, w: int, h: int):
-    """Trim [start_s, end_s] and reframe to w x h (center-crop after scale)."""
+    """Trim [start_s, end_s] and reframe to w x h with face-aware cropping."""
     duration = max(0.1, end_s - start_s)
-    # scale so smaller dimension fills, then center-crop
-    vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}"
+
+    # Detect face position for smart crop
+    face_x = _detect_face_x(src, start_s, duration)
+
+    if face_x is not None:
+        # Face-aware crop: position crop window so face is centered
+        # crop_x expression: face_x ratio mapped to crop offset, clamped to valid range
+        # After scaling, the width is wider than target. We offset based on face position.
+        crop_x = f"max(0,min(iw-{w},{face_x}*iw-{w}/2))"
+        vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}:{crop_x}:0"
+        log.info("Smart crop — face at %.0f%%, crop_x=%s", face_x * 100, crop_x)
+    else:
+        # Fallback: center crop
+        vf = f"scale='if(gt(a,{w}/{h}),-2,{w})':'if(gt(a,{w}/{h}),{h},-2)',crop={w}:{h}"
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{start_s:.3f}",
