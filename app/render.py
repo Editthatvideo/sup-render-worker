@@ -197,7 +197,7 @@ def _fmt_srt_ts(seconds: float) -> str:
 
 
 def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
-    """Transcribe with word-level timestamps → short subtitle chunks (3-5 words)."""
+    """Transcribe with word timestamps, split into complete sentences."""
     client = OpenAI(api_key=api_key)
     with open(src, "rb") as f:
         resp = client.audio.transcriptions.create(
@@ -208,30 +208,37 @@ def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
         )
 
     words = resp.words or []
-    if not words:
+    full_text = (resp.text or "").strip()
+
+    if not words or not full_text:
         srt_out.write_text("", encoding="utf-8")
         return srt_out
 
-    # Group words into short chunks — break on punctuation or every ~4 words
-    MAX_WORDS = 4
+    # Split the punctuated transcript into complete sentences
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', full_text) if s.strip()]
+
+    # Map each sentence to word-level timestamps
     chunks = []
-    buf = []
-    for w in words:
-        buf.append(w)
-        ends_sentence = w.word.rstrip().endswith((".", "?", "!", ","))
-        if len(buf) >= MAX_WORDS or ends_sentence:
+    wi = 0  # current position in word list
+    for sentence in sentences:
+        n = len(sentence.split())  # word count in this sentence
+        if wi >= len(words):
+            break
+        start = words[wi].start
+        end_idx = min(wi + n - 1, len(words) - 1)
+        end = words[end_idx].end
+        chunks.append({"start": start, "end": end, "text": sentence})
+        wi += n
+
+    # Catch any leftover words not covered by sentence split
+    if wi < len(words):
+        leftover = " ".join(w.word for w in words[wi:]).strip()
+        if leftover:
             chunks.append({
-                "start": buf[0].start,
-                "end": buf[-1].end,
-                "text": " ".join(b.word for b in buf).strip(),
+                "start": words[wi].start,
+                "end": words[-1].end,
+                "text": leftover,
             })
-            buf = []
-    if buf:
-        chunks.append({
-            "start": buf[0].start,
-            "end": buf[-1].end,
-            "text": " ".join(b.word for b in buf).strip(),
-        })
 
     # Build SRT
     srt_lines = []
@@ -242,7 +249,7 @@ def transcribe_to_srt(src: Path, srt_out: Path, api_key: str):
         srt_lines.append("")
 
     srt_out.write_text("\n".join(srt_lines), encoding="utf-8")
-    log.info("Generated %d subtitle chunks from %d words", len(chunks), len(words))
+    log.info("Generated %d subtitle sentences from %d words", len(chunks), len(words))
     return srt_out
 
 
