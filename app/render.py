@@ -326,10 +326,8 @@ def run_render_job(job_id: str, req: dict) -> dict:
         ]
         headline = pick_best_caption(ideas, req.get("scene_description", ""), settings.openai_api_key)
 
-    # Use only the first sentence as the hook — don't give away the punchline
-    hook = _first_sentence(headline) if headline else ""
-    log.info("[%s] Burning captions + hook: %s", job_id, hook)
-    burn_captions(trimmed, srt, hook, final, settings)
+    log.info("[%s] Burning captions + headline: %s", job_id, headline)
+    burn_captions(trimmed, srt, headline, final, settings)
 
     log.info("[%s] Uploading to Drive", job_id)
     drive_result = upload_file(final, f"{final.name}")
