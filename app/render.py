@@ -151,11 +151,15 @@ def _try_ytdlp(url: str, out_path: Path, use_cookies: bool, player_clients: list
         "noplaylist": True,
         "extractor_args": {"youtube": {"player_client": player_clients}},
         "socket_timeout": 30,
+        "remote_components": "ejs:github",  # solve YouTube JS challenges via deno
     }
     if use_cookies:
         cookie_file = _write_cookies_file(out_path.parent)
         if cookie_file:
             ydl_opts["cookiefile"] = str(cookie_file)
+            log.info("Using cookies file (%d bytes)", cookie_file.stat().st_size)
+        else:
+            log.warning("Cookies requested but YOUTUBE_COOKIES_B64 is empty — skipping")
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         final = Path(ydl.prepare_filename(info)).with_suffix(".mp4")
