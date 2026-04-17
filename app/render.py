@@ -284,6 +284,95 @@ def pick_best_caption(ideas: list[str], scene: str, api_key: str) -> str:
     return chosen
 
 
+# ---- Auto-Clip Picker -------------------------------------------------------
+
+def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
+    """Grab YouTube's auto-captions without downloading the video."""
+    cookie_file = _write_cookies_file(work_dir)
+    ydl_opts = {
+        "skip_download": True,
+        "writeautomaticsub": True,
+        "writesubtitles": True,
+        "subtitleslangs": ["en"],
+        "subtitlesformat": "vtt",
+        "outtmpl": str(work_dir / "subs"),
+        "quiet": True,
+        "noplaylist": True,
+    }
+    if cookie_file:
+        ydl_opts["cookiefile"] = str(cookie_file)
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=False)
+
+    # Find the subtitle file yt-dlp wrote
+    for ext in ("en.vtt", "en.srt"):
+        sub_file = work_dir / f"subs.{ext}"
+        if sub_file.exists():
+            raw = sub_file.read_text(encoding="utf-8")
+            # Strip VTT headers and timestamps, keep just the text lines
+            lines = []
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line or line.startswith("WEBVTT") or line.startswith("Kind:") \
+                   or line.startswith("Language:") or "-->" in line or line.isdigit():
+                    continue
+                # Remove VTT tags like <00:00:01.440>
+                cleaned = re.sub(r"<[^>]+>", "", line).strip()
+                if cleaned and cleaned not in lines[-1:]:  # dedup consecutive
+                    lines.append(cleaned)
+            return " ".join(lines)
+    return None
+
+
+def auto_pick_clip(url: str, scene: str, work_dir: Path, api_key: str,
+                   min_dur: int = 5, max_dur: int = 15) -> tuple[float, float]:
+    """Use YouTube captions + GPT to pick the best clip window."""
+    log.info("Auto-picking best clip from %s", url)
+
+    transcript = _fetch_youtube_transcript(url, work_dir)
+    if not transcript:
+        # No captions available — default to first 10 seconds
+        log.warning("No YouTube captions found, defaulting to 0-10s")
+        return 0.0, 10.0
+
+    prompt = (
+        f"You are a viral TikTok/Reels editor. Given a video transcript, pick the single "
+        f"most compelling {min_dur}-{max_dur} second clip for maximum engagement.\n\n"
+        f"Scene context: {scene or 'not provided'}\n\n"
+        f"Full transcript:\n{transcript[:3000]}\n\n"
+        f"Pick the segment with the best hook — something surprising, funny, emotional, "
+        f"or controversial that makes viewers stop scrolling.\n\n"
+        f"Reply with ONLY two numbers on one line: START_SECONDS END_SECONDS\n"
+        f"Example: 45 57\n"
+        f"No other text."
+    )
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=20,
+        temperature=0.3,
+    )
+    answer = resp.choices[0].message.content.strip()
+    log.info("AI picked clip window: %s", answer)
+
+    # Parse "45 57" or "45.5 57.2"
+    parts = answer.split()
+    if len(parts) >= 2:
+        try:
+            start = float(parts[0])
+            end = float(parts[1])
+            if end > start:
+                return start, end
+        except ValueError:
+            pass
+
+    log.warning("Could not parse AI clip response %r, defaulting to 0-10s", answer)
+    return 0.0, 10.0
+
+
 # ---- Orchestration ----------------------------------------------------------
 
 def _slug(s: str) -> str:
@@ -301,13 +390,26 @@ def run_render_job(job_id: str, req: dict) -> dict:
     srt = work / "captions.srt"
     final = work / f"{_slug(req.get('movie_show', 'clip'))}_{req['row_number']}.mp4"
 
+    # If no timestamps provided, AI picks the best clip from YouTube captions
+    clip_start_raw = req.get("clip_start", "").strip()
+    clip_end_raw = req.get("clip_end", "").strip()
+
+    if clip_start_raw and clip_end_raw:
+        start_s = parse_timestamp(clip_start_raw)
+        end_s = parse_timestamp(clip_end_raw)
+        if end_s <= start_s:
+            raise ValueError(f"clip_end ({end_s}) must be > clip_start ({start_s})")
+    else:
+        start_s, end_s = auto_pick_clip(
+            req["youtube_url"],
+            req.get("scene_description", ""),
+            work,
+            settings.openai_api_key,
+        )
+        log.info("[%s] AI auto-picked clip: %.1fs - %.1fs", job_id, start_s, end_s)
+
     log.info("[%s] Downloading %s", job_id, req["youtube_url"])
     src = download_youtube(req["youtube_url"], raw)
-
-    start_s = parse_timestamp(req["clip_start"])
-    end_s = parse_timestamp(req["clip_end"])
-    if end_s <= start_s:
-        raise ValueError(f"clip_end ({end_s}) must be > clip_start ({start_s})")
 
     log.info("[%s] Trimming %.2fs-%.2fs and reframing", job_id, start_s, end_s)
     trim_and_reframe(src, trimmed, start_s, end_s,
