@@ -223,7 +223,7 @@ def download_youtube(url: str, out_path: Path) -> Path:
     cmd = [
         "yt-dlp",
         "--remote-components", "ejs:github",
-        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio",
+        "-f", "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height>=480]/best",
         "-o", out_template,
         "--merge-output-format", "mp4",
         "--no-playlist",
@@ -242,7 +242,16 @@ def download_youtube(url: str, out_path: Path) -> Path:
         log.info("yt-dlp stderr: %s", result.stderr[-2000:])
 
     if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp failed (exit {result.returncode}): {result.stderr[-500:]}")
+        # If cookies caused the failure, retry without them
+        if cookie_file and ("no longer valid" in (result.stderr or "") or "Requested format" in (result.stderr or "")):
+            log.warning("Retrying download WITHOUT cookies (they may be causing issues)")
+            cmd_no_cookies = [c for c in cmd if c != "--cookies" and c != str(cookie_file)]
+            result = subprocess.run(cmd_no_cookies, capture_output=True, text=True, timeout=300)
+            log.info("yt-dlp retry stdout: %s", result.stdout[-2000:] if result.stdout else "(empty)")
+            if result.stderr:
+                log.info("yt-dlp retry stderr: %s", result.stderr[-2000:])
+        if result.returncode != 0:
+            raise RuntimeError(f"yt-dlp failed (exit {result.returncode}): {result.stderr[-500:]}")
 
     # Find the output file
     final = out_path.with_suffix(".mp4")
@@ -638,6 +647,13 @@ def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             log.warning("Transcript fetch failed (exit %d): %s", result.returncode, result.stderr[-500:])
+            # Retry without cookies if they might be the issue
+            if cookie_file:
+                log.info("Retrying transcript fetch without cookies")
+                cmd_no_cookies = [c for c in cmd if c != "--cookies" and c != str(cookie_file)]
+                result = subprocess.run(cmd_no_cookies, capture_output=True, text=True, timeout=60)
+                if result.returncode != 0:
+                    log.warning("Transcript retry also failed (exit %d)", result.returncode)
     except Exception as e:
         log.warning("Could not fetch YouTube captions: %s", e)
         return None
@@ -661,6 +677,32 @@ def _fetch_youtube_transcript(url: str, work_dir: Path) -> str | None:
             transcript = " ".join(lines)
             log.info("Got transcript (%d chars): %s...", len(transcript), transcript[:200])
             return transcript if transcript else None
+
+    # Nothing found with cookies — try once more without if we haven't already
+    if cookie_file:
+        log.info("No subs found — trying transcript fetch without cookies")
+        cmd_no_cookies = [c for c in cmd if c != "--cookies" and c != str(cookie_file)]
+        try:
+            subprocess.run(cmd_no_cookies, capture_output=True, text=True, timeout=60)
+        except Exception:
+            pass
+        for pattern in ("subs.en.vtt", "subs.en.srt", "subs*.en.vtt", "subs*.en.srt"):
+            matches = list(work_dir.glob(pattern))
+            if matches:
+                raw = matches[0].read_text(encoding="utf-8")
+                lines = []
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("WEBVTT") or line.startswith("Kind:") \
+                       or line.startswith("Language:") or "-->" in line or line.isdigit():
+                        continue
+                    cleaned = re.sub(r"<[^>]+>", "", line).strip()
+                    if cleaned and cleaned not in lines[-1:]:
+                        lines.append(cleaned)
+                transcript = " ".join(lines)
+                log.info("Got transcript on cookieless retry (%d chars)", len(transcript))
+                return transcript if transcript else None
+
     log.warning("No subtitle files found after yt-dlp transcript fetch")
     return None
 
