@@ -54,13 +54,22 @@ def run(cmd: list[str], check=True):
 # ---- Download ---------------------------------------------------------------
 
 def _write_cookies_file(work_dir: Path) -> Path | None:
-    """Decode YOUTUBE_COOKIES_B64 env var to a Netscape cookies.txt file."""
+    """Decode YOUTUBE_COOKIES_B64 env var to a Netscape cookies.txt file.
+    Supports both plain base64 and gzip+base64 (for large cookie files)."""
+    import gzip as _gzip
     settings = get_settings()
     if not settings.youtube_cookies_b64:
         return None
     cookie_path = work_dir / "cookies.txt"
-    cookie_path.write_bytes(base64.b64decode(settings.youtube_cookies_b64))
-    log.info("Wrote YouTube cookies to %s", cookie_path)
+    raw = base64.b64decode(settings.youtube_cookies_b64)
+    # Try gzip decompression first (for compressed cookies)
+    try:
+        raw = _gzip.decompress(raw)
+        log.info("Decompressed gzipped cookies (%d bytes)", len(raw))
+    except Exception:
+        pass  # Not gzipped, use as-is
+    cookie_path.write_bytes(raw)
+    log.info("Wrote YouTube cookies to %s (%d bytes)", cookie_path, len(raw))
     return cookie_path
 
 
@@ -689,6 +698,92 @@ def auto_pick_clip(url: str, scene: str, work_dir: Path, api_key: str,
     return 5.0, 15.0
 
 
+def _whisper_pick_clip(src: Path, scene: str, api_key: str, work_dir: Path,
+                       min_dur: int = 5, max_dur: int = 15) -> tuple[float, float]:
+    """Extract audio from downloaded video, Whisper-transcribe first 2 min, AI-pick best clip."""
+    log.info("Using Whisper to transcribe downloaded video for clip picking")
+
+    # Extract first 2 minutes of audio as mp3 (keeps Whisper costs down)
+    audio_clip = work_dir / "clip_audio.mp3"
+    extract_cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-t", "120",  # first 2 minutes only
+        "-vn", "-acodec", "libmp3lame", "-ab", "64k", "-ar", "16000", "-ac", "1",
+        str(audio_clip),
+    ]
+    try:
+        subprocess.run(extract_cmd, capture_output=True, timeout=30, check=True)
+    except Exception as e:
+        log.warning("Could not extract audio for clip picking: %s", e)
+        return 8.0, 20.0
+
+    if not audio_clip.exists() or audio_clip.stat().st_size < 1000:
+        log.warning("Audio extraction produced no usable file")
+        return 8.0, 20.0
+
+    # Whisper transcribe with word timestamps
+    try:
+        client = OpenAI(api_key=api_key)
+        with open(audio_clip, "rb") as f:
+            resp = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f,
+                response_format="verbose_json",
+                timestamp_granularities=["segment"],
+            )
+        transcript = (resp.text or "").strip()
+        log.info("Whisper transcript (%d chars): %s...", len(transcript), transcript[:200])
+    except Exception as e:
+        log.warning("Whisper transcription failed for clip picking: %s", e)
+        return 8.0, 20.0
+    finally:
+        audio_clip.unlink(missing_ok=True)
+
+    if not transcript:
+        return 8.0, 20.0
+
+    # Use GPT to pick the best clip from the transcript
+    prompt = (
+        f"You are a viral TikTok/Reels editor. Given a video transcript, pick the single "
+        f"most compelling {min_dur}-{max_dur} second clip for maximum engagement.\n\n"
+        f"Scene context: {scene or 'not provided'}\n\n"
+        f"Full transcript:\n{transcript[:3000]}\n\n"
+        f"CRITICAL RULES:\n"
+        f"- Pick a segment where someone is TALKING — we need faces on screen\n"
+        f"- NEVER pick the first 5 seconds (usually establishing shots with no people)\n"
+        f"- Pick dialogue, reactions, arguments — moments with visible emotion\n"
+        f"- The best hook is a person saying something surprising, funny, or controversial\n\n"
+        f"Reply with ONLY two numbers on one line: START_SECONDS END_SECONDS\n"
+        f"Example: 45 57\n"
+        f"No other text."
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=20,
+            temperature=0.3,
+        )
+        answer = resp.choices[0].message.content.strip()
+        log.info("AI picked clip window: %s", answer)
+
+        parts = answer.split()
+        if len(parts) >= 2:
+            start = float(parts[0])
+            end = float(parts[1])
+            if end > start and start >= 0:
+                if start < 3.0:
+                    log.warning("AI picked near-start clip, bumping to 5s")
+                    start = 5.0
+                    end = max(end, start + min_dur)
+                return start, end
+    except Exception as e:
+        log.warning("GPT clip pick failed: %s", e)
+
+    return 8.0, 20.0
+
+
 # ---- Orchestration ----------------------------------------------------------
 
 def _slug(s: str) -> str:
@@ -716,6 +811,10 @@ def run_render_job(job_id: str, req: dict) -> dict:
         youtube_url = search_youtube(movie_show, scene_desc, work, settings.openai_api_key)
         log.info("[%s] Auto-found YouTube URL: %s", job_id, youtube_url)
 
+    # Download first — we need the file for both clip picking and rendering
+    log.info("[%s] Downloading %s", job_id, youtube_url)
+    src = download_youtube(youtube_url, raw)
+
     # Auto-pick clip timestamps if not provided
     clip_start_raw = req.get("clip_start", "").strip()
     clip_end_raw = req.get("clip_end", "").strip()
@@ -726,16 +825,15 @@ def run_render_job(job_id: str, req: dict) -> dict:
         if end_s <= start_s:
             raise ValueError(f"clip_end ({end_s}) must be > clip_start ({start_s})")
     else:
-        start_s, end_s = auto_pick_clip(
-            youtube_url,
+        # Use Whisper on the downloaded video to get transcript for clip picking
+        # (YouTube captions are unreliable due to bot detection)
+        start_s, end_s = _whisper_pick_clip(
+            src,
             req.get("scene_description", ""),
-            work,
             settings.openai_api_key,
+            work,
         )
         log.info("[%s] AI auto-picked clip: %.1fs - %.1fs", job_id, start_s, end_s)
-
-    log.info("[%s] Downloading %s", job_id, youtube_url)
-    src = download_youtube(youtube_url, raw)
 
     log.info("[%s] Trimming %.2fs-%.2fs and reframing", job_id, start_s, end_s)
     trim_and_reframe(src, trimmed, start_s, end_s,
